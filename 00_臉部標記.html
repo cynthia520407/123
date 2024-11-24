@@ -1,0 +1,237 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>簡易人臉偵測</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 20px;
+            font-family: Arial, sans-serif;
+        }
+        .container {
+            position: relative;
+        }
+        #webcam {
+            transform: rotateY(180deg);
+            -webkit-transform: rotateY(180deg);
+            width: 1280px;
+            height: 720px;
+        }
+        #output_canvas {
+            position: absolute;
+            left: 0;
+            top: 0;
+            transform: rotateY(180deg);
+            -webkit-transform: rotateY(180deg);
+        }
+        #status {
+            position: fixed;
+            top: 10px;
+            left: 10px;
+            background: rgba(0, 0, 0, 0.7);
+            color: white;
+            padding: 10px;
+            border-radius: 5px;
+            font-size: 14px;
+            z-index: 1000;
+        }
+        .particle {
+            position: absolute;
+            pointer-events: none;
+            z-index: 100;
+            transition: opacity 1s;
+        }
+    </style>
+</head>
+<body>
+    <div id="status">系統狀態: 初始化中...</div>
+    <div class="container">
+        <video id="webcam" autoplay playsinline></video>
+        <canvas id="output_canvas"></canvas>
+    </div>
+
+<script type="module">
+import vision from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.3";
+const { FaceLandmarker, FilesetResolver, DrawingUtils } = vision;
+
+const video = document.getElementById("webcam");
+const canvasElement = document.getElementById("output_canvas");
+const canvasCtx = canvasElement.getContext("2d");
+const statusElement = document.getElementById("status");
+
+let faceLandmarker;
+let runningMode = "VIDEO";
+let lastVideoTime = -1;
+let results = undefined;
+
+// 更新狀態顯示
+function updateStatus(message, isError = false) {
+    statusElement.style.backgroundColor = isError ? 'rgba(255,0,0,0.7)' : 'rgba(0,0,0,0.7)';
+    statusElement.textContent = message;
+}
+
+// 初始化 FaceLandmarker
+async function initializeFaceLandmarker() {
+    try {
+        updateStatus("正在載入模型...");
+        const filesetResolver = await FilesetResolver.forVisionTasks(
+            "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.3/wasm"
+        );
+        faceLandmarker = await FaceLandmarker.createFromOptions(filesetResolver, {
+            baseOptions: {
+                modelAssetPath: `https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task`,
+                delegate: "GPU"
+            },
+            outputFaceBlendshapes: true,
+            runningMode,
+            numFaces: 1
+        });
+        updateStatus("模型載入完成，正在啟動攝影機...");
+        startCamera();
+    } catch (error) {
+        updateStatus(`初始化錯誤: ${error.message}`, true);
+        console.error(error);
+    }
+}
+
+// 啟動攝影機
+async function startCamera() {
+    try {
+        const stream = await navigator.mediaDevices.getUserMedia({
+            video: {
+                width: 1280,
+                height: 720
+            }
+        });
+        video.srcObject = stream;
+        video.addEventListener("loadeddata", predictWebcam);
+        updateStatus("系統運作中");
+    } catch (error) {
+        updateStatus(`攝影機啟動錯誤: ${error.message}`, true);
+        console.error(error);
+    }
+}
+
+// 新增粒子系統
+class Particle {
+    constructor(x, y, emoji, container) {
+        this.element = document.createElement('div');
+        this.element.className = 'particle';
+        this.element.style.position = 'absolute';
+        this.element.style.fontSize = '150px';
+        this.element.textContent = emoji;
+        this.x = x;
+        this.y = y;
+        this.vx = (Math.random() - 0.5) * 10; // 水平初速度
+        this.vy = -Math.random() * 15 - 5;    // 垂直初速度
+        this.gravity = 0.8;                    // 重力加速度
+        container.appendChild(this.element);
+        
+        // 設定初始位置
+        this.element.style.left = `${x}px`;
+        this.element.style.top = `${y}px`;
+        
+        // 1秒後開始淡出
+        setTimeout(() => {
+            this.element.style.opacity = '0';
+        }, 0);
+        
+        // 2秒後移除元素
+        setTimeout(() => {
+            this.element.remove();
+        }, 2000);
+    }
+
+    update() {
+        this.vy += this.gravity;
+        this.x += this.vx;
+        this.y += this.vy;
+        
+        this.element.style.left = `${this.x}px`;
+        this.element.style.top = `${this.y}px`;
+    }
+}
+
+let particles = [];
+let lastBloodEmitTime = 0;
+const BLOOD_EMIT_INTERVAL = 50; // 每50ms發射一顆（約每秒20顆）
+
+// 修改 predictWebcam 函數
+async function predictWebcam() {
+    canvasElement.width = video.videoWidth;
+    canvasElement.height = video.videoHeight;
+    
+    try {
+        if (lastVideoTime !== video.currentTime) {
+            lastVideoTime = video.currentTime;
+            results = faceLandmarker.detectForVideo(video, performance.now());
+        }
+
+        canvasCtx.clearRect(0, 0, canvasElement.width, canvasElement.height);
+        
+        const drawingUtils = new DrawingUtils(canvasCtx);
+        
+        if (results.faceLandmarks) {
+            for (const landmarks of results.faceLandmarks) {
+                // 不再繪製網格
+                
+                // 取得眼睛位置
+                const leftEye = landmarks[159]; // 左眼中心點
+                const rightEye = landmarks[386]; // 右眼中心點
+                
+                // 繪製星星
+                drawEmoji(leftEye.x * canvasElement.width, leftEye.y * canvasElement.height, "⭐");
+                drawEmoji(rightEye.x * canvasElement.width, rightEye.y * canvasElement.height, "⭐");
+                
+                // 檢測嘴巴開合
+                const upperLip = landmarks[13];  // 上唇中心
+                const lowerLip = landmarks[14];  // 下唇中心
+                const mouthOpen = Math.abs(upperLip.y - lowerLip.y) > 0.05; // 嘴巴開合閾值
+                
+                if (mouthOpen) {
+                    const now = performance.now();
+                    if (now - lastBloodEmitTime > BLOOD_EMIT_INTERVAL) {
+                        const mouthX = (upperLip.x + lowerLip.x) / 2 * canvasElement.width;
+                        const mouthY = (upperLip.y + lowerLip.y) / 2 * canvasElement.height;
+                        particles.push(new Particle(mouthX, mouthY, "🩸", document.body));
+                        lastBloodEmitTime = now;
+                    }
+                }
+            }
+        }
+        
+        // 更新所有粒子
+        particles.forEach((particle, index) => {
+            particle.update();
+        });
+        
+        // 移除超出畫面的粒子
+        particles = particles.filter(p => 
+            p.y < canvasElement.height && 
+            p.x > 0 && 
+            p.x < canvasElement.width
+        );
+        
+    } catch (error) {
+        updateStatus(`偵測錯誤: ${error.message}`, true);
+        console.error(error);
+    }
+
+    requestAnimationFrame(predictWebcam);
+}
+
+// 繪製 emoji
+function drawEmoji(x, y, emoji) {
+    canvasCtx.font = "150px Arial";
+    canvasCtx.textAlign = "center";
+    canvasCtx.textBaseline = "middle";
+    canvasCtx.fillText(emoji, x, y);
+}
+
+// 啟動程式
+initializeFaceLandmarker();
+</script>
+
+</body>
+</html>
